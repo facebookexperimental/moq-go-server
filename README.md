@@ -37,15 +37,11 @@ sudo yum update -y
 sudo yum install git tmux -y
 ```
 
-- Install go version go1.18 (**there are known problems if you try versions higher than this**)
+- Install go version go1.20+
 
 ```bash
-curl https://dl.google.com/go/go1.18.10.linux-amd64.tar.gz -o go1.18.10.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go
-tar -C /usr/local -xzf go1.18.10.linux-amd64.tar.gz
+sudo yum install golang -y
 ```
-  
-- Edit bash profile `nano .bash_profile` and add at the end `export PATH=$PATH:/usr/local/go/bin`
 
 - Install and activate a webServer
 
