@@ -8,9 +8,9 @@ package moqfwdtable
 
 import (
 	"errors"
+	"facebookexperimental/moq-go-server/moqhelpers"
+	"facebookexperimental/moq-go-server/moqsession"
 	"fmt"
-	"jordicenzano/moq-go-server/moqhelpers"
-	"jordicenzano/moq-go-server/moqsession"
 	"sync"
 )
 

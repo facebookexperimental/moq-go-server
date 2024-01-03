@@ -8,10 +8,10 @@ package moqhelpers
 
 import (
 	"errors"
+	"facebookexperimental/moq-go-server/moqhelpers/quichelpers"
+	"facebookexperimental/moq-go-server/moqobject"
 	"fmt"
 	"io"
-	"jordicenzano/moq-go-server/moqhelpers/quichelpers"
-	"jordicenzano/moq-go-server/moqobject"
 
 	"golang.org/x/exp/slices"
 )

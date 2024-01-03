@@ -1,4 +1,4 @@
-module jordicenzano/moq-go-server
+module facebookexperimental/moq-go-server
 
 go 1.21
 
