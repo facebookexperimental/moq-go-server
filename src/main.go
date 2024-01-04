@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/adriancable/webtransport-go"
+	"github.com/quic-go/quic-go"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -81,8 +82,7 @@ func createObjectCacheKey(trackNamespace string, trackName string, moqObjectHead
 // MOQ
 
 func terminateSessionWithError(session *webtransport.Session, errMoq moqhelpers.MoqError) {
-	// TODO fix (when I can add webtransport-go)
-	session.CloseWithError(0, errMoq.ErrMsg)
+	session.CloseWithError(quic.ApplicationErrorCode(errMoq.ErrCode), errMoq.ErrMsg)
 }
 
 func processAnnounce(moqMsg interface{}, stream webtransport.Stream, moqSession *moqsession.MoqSession) (errorSessionMoq moqhelpers.MoqError) {
