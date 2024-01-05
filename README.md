@@ -71,8 +71,8 @@ sudo yum install mod_ssl -y
     ServerAlias "subdomain.yourdomain.com"
 
     SSLEngine on
-    SSLCertificateFile "/etc/letsencrypt/live/moq-madrid.jordicenzano.name/fullchain.pem"
-    SSLCertificateKeyFile "/etc/letsencrypt/live/moq-madrid.jordicenzano.name/privkey.pem"
+    SSLCertificateFile "/etc/letsencrypt/live/subdomain.yourdomain.com/fullchain.pem"
+    SSLCertificateKeyFile "/etc/letsencrypt/live/subdomain.yourdomain.com/privkey.pem"
 </VirtualHost>
 ```
 
@@ -97,9 +97,9 @@ go build
 ```bash
 cd ..
 mkdir certs
-sudo cp /etc/letsencrypt/live/[YOUR_DOMAIN]/privkey.pem certs/certificate.key
+sudo cp /etc/letsencrypt/live/subdomain.yourdomain.com/privkey.pem certs/certificate.key
 sudo chmod 644 certs/certificate.key
-sudo cp /etc/letsencrypt/live/[YOUR_DOMAIN]/cert.pem certs/certificate.pem
+sudo cp /etc/letsencrypt/live/subdomain.yourdomain.com/cert.pem certs/certificate.pem
 ```
 
 - Start server inside tmux
