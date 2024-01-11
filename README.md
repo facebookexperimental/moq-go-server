@@ -82,7 +82,7 @@ sudo yum install mod_ssl -y
 - Clone this repo
 
 ```bash
-git clone facebookexperimental/moq-go-server
+git clone git@github.com:facebookexperimental/moq-go-server.git
 ```
 
 - Compile it
