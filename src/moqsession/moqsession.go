@@ -62,7 +62,7 @@ type MoqSession struct {
 	// Channel use to forward subscribes
 	channelSubscribe chan MoqSubscribeChannelMessage
 
-	// Channel use to forward subscribes OK messages
+	// Channel use to forward subscribes response (Ok/Err) messages
 	channelSubscribeResponse chan MoqSubscribeResponseChannelMessage
 
 	// Data for subscribers or both
