@@ -1,0 +1,9 @@
+{
+  "origins": [
+    {
+      "friendlyname": "test",
+      "urlregexp": ".*",
+	    "originaddress" : "https://localhost:4455/moq"
+    }
+  ]
+}

@@ -85,6 +85,10 @@ func (mft *MoqFwdTable) ForwardSubscribe(subscribe moqhelpers.MoqMessageSubscrib
 		}
 	}
 
+	// TODO: JOC here needs to see origins
+	// Create a class moqOrigin that keeps a subscriber connection (careful other side will be publisher)
+	// That class can leverage moqClient class
+
 	if !anyPublishers {
 		err = errors.New(fmt.Sprintf("We could NOT find any publishers for TrackNamespace %s", subscribe.TrackNamespace))
 	}

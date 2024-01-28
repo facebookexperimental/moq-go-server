@@ -28,7 +28,7 @@ type MoqMessageObjects struct {
 }
 
 // New Creates a new mem files map
-func New(housekeepingPeriodMs int64) *MoqMessageObjects {
+func New(housekeepingPeriodMs uint64) *MoqMessageObjects {
 	moqtObjs := MoqMessageObjects{dataMap: map[string]*moqobject.MoqObject{}, mapLock: new(sync.RWMutex), cleanUpChannel: make(chan bool)}
 
 	if housekeepingPeriodMs > 0 {
@@ -69,7 +69,7 @@ func (moqtObjs *MoqMessageObjects) Stop() {
 
 // Housekeeping
 
-func (moqtObjs *MoqMessageObjects) startCleanUp(periodMs int64) {
+func (moqtObjs *MoqMessageObjects) startCleanUp(periodMs uint64) {
 	go moqtObjs.runCleanupEvery(periodMs, moqtObjs.cleanUpChannel)
 
 	log.Info("Started clean up thread")
@@ -85,7 +85,7 @@ func (moqtObjs *MoqMessageObjects) stopCleanUp() {
 	log.Info("Stopped clean up thread")
 }
 
-func (moqtObjs *MoqMessageObjects) runCleanupEvery(periodMs int64, cleanUpChannelBidi chan bool) {
+func (moqtObjs *MoqMessageObjects) runCleanupEvery(periodMs uint64, cleanUpChannelBidi chan bool) {
 	timeCh := time.NewTicker(time.Millisecond * time.Duration(periodMs))
 	exit := false
 
