@@ -136,8 +136,7 @@ Note: The delve listen port needs to be open in that remote machine
 - Connect VSCode (or other IDE) to that remote machine
 In this [link](https://blog.devgenius.io/remote-debugging-golang-application-in-vs-code-5215b43ebe31) you can find a good guide
 
-PS: Webtransport implementation of QUIC-GO currently does NOT allow localtesting, see open [issue](https://github.com/quic-go/webtransport-go/issues/112)
-Note: To test the code in your computer and Chrome you can use the script `scripts/start-localhost-test-chrome.sh` that allows you to use WebTransport in your localhost (not safe environment)
+Note: Webtransport implementation of QUIC-GO currently does NOT allow localtesting, see open [issue](https://github.com/quic-go/webtransport-go/issues/112)
 
 ## License
 
