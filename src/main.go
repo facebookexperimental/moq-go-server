@@ -14,6 +14,7 @@ import (
 	"facebookexperimental/moq-go-server/moqmessageobjects"
 	"facebookexperimental/moq-go-server/moqobject"
 	"facebookexperimental/moq-go-server/moqsession"
+	"flag"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -26,21 +27,34 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const CACHE_CLEAN_UP_PERIOD_MS = 10000
-const OBJECT_EXPIRATION_S = 3 * 60
-const NO_MORE_FRAMES_WAIT_MS = 5
-const MOQ_LIVE_LOOKBACK_MS = 20000
+// Default parameters
+const HTTP_SERVER_LISTEN_ADDR = ":4433"
+const TLS_CERT_FILEPATH = "../certs/certificate.pem"
+const TLS_KEY_FILEPATH = "../certs/certificate.key"
+const OBJECT_EXPIRATION_MS = 3 * 60 * 1000
+const CACHE_CLEAN_UP_PERIOD_MS = 10 * 1000
+const HTTP_CONNECTION_KEEP_ALIVE_MS = 10 * 1000
 
 // Main function
 
 func main() {
+	// Parse params
+	listenAddr := flag.String("listen_addr", HTTP_SERVER_LISTEN_ADDR, "Server listen port (example: \":4433\")")
+	tlsCertPath := flag.String("tls_cert", TLS_CERT_FILEPATH, "TLS certificate file path to use in this server")
+	tlsKeyPath := flag.String("tls_key", TLS_KEY_FILEPATH, "TLS key file path to use in this server")
+	objExpMs := flag.Uint64("obj_exp_ms", OBJECT_EXPIRATION_MS, "Object TTL in this server (in milliseconds)")
+	cacheCleanUpPeriodMs := flag.Uint64("cache_cleanup_period_ms", CACHE_CLEAN_UP_PERIOD_MS, "Execute clean up task every (in milliseconds)")
+	httpConnTimeoutMs := flag.Uint64("http_conn_time_out_ms", HTTP_CONNECTION_KEEP_ALIVE_MS, "HTTP connection timeout (in milliseconds)")
+
+	flag.Parse()
+
 	log.SetFormatter(&log.TextFormatter{})
 
 	// Create moqt obj forward table
 	moqtFwdTable := moqfwdtable.New()
 
 	// create objects mem storage (relay)
-	objects := moqmessageobjects.New(CACHE_CLEAN_UP_PERIOD_MS)
+	objects := moqmessageobjects.New(*cacheCleanUpPeriodMs)
 
 	http.HandleFunc("/moq", func(rw http.ResponseWriter, r *http.Request) {
 		session := r.Body.(*webtransport.Session)
@@ -50,16 +64,16 @@ func main() {
 		namespace := r.URL.Path
 		log.Info(fmt.Sprintf("%s - Accepted incoming WebTransport session. rawQuery: %s", namespace, r.URL.RawQuery))
 
-		handleWebTransportMoq(session, namespace, moqtFwdTable, objects)
+		handleWebTransportMoq(session, namespace, moqtFwdTable, objects, *objExpMs)
 	})
 
 	server := &webtransport.Server{
-		ListenAddr: ":4433",
-		TLSCert:    webtransport.CertFile{Path: "../certs/certificate.pem"},
-		TLSKey:     webtransport.CertFile{Path: "../certs/certificate.key"},
+		ListenAddr: *listenAddr,
+		TLSCert:    webtransport.CertFile{Path: *tlsCertPath},
+		TLSKey:     webtransport.CertFile{Path: *tlsKeyPath},
 		QuicConfig: &webtransport.QuicConfig{
-			KeepAlivePeriod: 10 * time.Second,
-			MaxIdleTimeout:  30 * time.Second,
+			KeepAlivePeriod: time.Duration(*httpConnTimeoutMs/1000) * time.Second,
+			MaxIdleTimeout:  time.Duration(3*(*httpConnTimeoutMs/1000)) * time.Second,
 		},
 	}
 
@@ -283,7 +297,7 @@ func processSubscribeError(moqMsg interface{}, stream webtransport.Stream, moqSe
 	return
 }
 
-func handleWebTransportMoq(session *webtransport.Session, namespace string, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects) {
+func handleWebTransportMoq(session *webtransport.Session, namespace string, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
 	// Accept bidirectional streams (control stream)
 	stream, err := session.AcceptStream()
 	if err != nil {
@@ -330,7 +344,7 @@ func handleWebTransportMoq(session *webtransport.Session, namespace string, moqt
 
 	if moqSetup.Role == moqhelpers.MoqRolePublisher {
 		// They will exit when session finishes
-		go startListeningObjects(session, moqSession, moqtFwdTable, objects)
+		go startListeningObjects(session, moqSession, moqtFwdTable, objects, objExpMs)
 		go startForwardSubscribes(stream, moqSession)
 	} else if moqSetup.Role == moqhelpers.MoqRoleSubscriber {
 		// It will exit when session finishes
@@ -450,7 +464,7 @@ func startForwardSubscribeResponses(stream webtransport.Stream, moqSession *moqs
 
 // Thread for publisher (receive objects)
 
-func startListeningObjects(session *webtransport.Session, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects) {
+func startListeningObjects(session *webtransport.Session, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
 	for {
 		uniStream, errAccUni := session.AcceptUniStream(session.Context())
 		if errAccUni != nil {
@@ -483,7 +497,7 @@ func startListeningObjects(session *webtransport.Session, moqSession *moqsession
 
 			// Create cache key
 			cacheKey := createObjectCacheKey(trackNamespace, trackName, moqObjHeader)
-			moqObj, errAddingMoqObj := objects.Create(cacheKey, moqObjHeader, OBJECT_EXPIRATION_S)
+			moqObj, errAddingMoqObj := objects.Create(cacheKey, moqObjHeader, objExpMs/1000)
 			if errAddingMoqObj != nil {
 				log.Error(fmt.Sprintf("%s(%v) - Received obj error, key: %s, Obj header: %s. Err: %v", moqSession.UniqueName, (*uniStream).StreamID(), cacheKey, moqObjHeader.GetDebugStr(), errAddingMoqObj))
 			} else {
