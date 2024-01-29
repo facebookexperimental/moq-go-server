@@ -14,10 +14,14 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/adriancable/webtransport-go"
-
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/webtransport-go"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -44,39 +48,55 @@ func main() {
 
 	log.SetFormatter(&log.TextFormatter{})
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Create moqt obj forward table
 	moqtFwdTable := moqfwdtable.New()
 
 	// create objects mem storage (relay)
 	objects := moqmessageobjects.New(*cacheCleanUpPeriodMs)
 
-	http.HandleFunc("/moq", func(rw http.ResponseWriter, r *http.Request) {
-		session := r.Body.(*webtransport.Session)
-		session.AcceptSession()
-		// session.RejectSession(400)
+	s := webtransport.Server{
+		CheckOrigin: CheckOrigin,
+		H3: http3.Server{Addr: *listenAddr,
+			QuicConfig: &quic.Config{
+				KeepAlivePeriod: time.Duration(*httpConnTimeoutMs/1000) * time.Second,
+				MaxIdleTimeout:  time.Duration(3*(*httpConnTimeoutMs/1000)) * time.Second,
+			}}}
+
+	// Catch ctrl+C
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		// Exit server
+		log.Info("Intercepted KILL SIGTERM")
+		cancel()
+		s.Close()
+	}()
+
+	http.HandleFunc("/moq", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := s.Upgrade(w, r)
+		if err != nil {
+			log.Error(fmt.Sprintf("Upgrading failed. Err: %v", err))
+			w.WriteHeader(500)
+			return
+		}
 
 		namespace := r.URL.Path
 		log.Info(fmt.Sprintf("%s - Accepted incoming WebTransport session. rawQuery: %s", namespace, r.URL.RawQuery))
 
-		moqconnectionmanagment.MoqConnectionManagment(session, namespace, moqtFwdTable, objects, *objExpMs)
+		moqconnectionmanagment.MoqConnectionManagment(ctx, conn, namespace, moqtFwdTable, objects, *objExpMs)
 	})
 
-	server := &webtransport.Server{
-		ListenAddr: *listenAddr,
-		TLSCert:    webtransport.CertFile{Path: *tlsCertPath},
-		TLSKey:     webtransport.CertFile{Path: *tlsKeyPath},
-		QuicConfig: &webtransport.QuicConfig{
-			KeepAlivePeriod: time.Duration(*httpConnTimeoutMs/1000) * time.Second,
-			MaxIdleTimeout:  time.Duration(3*(*httpConnTimeoutMs/1000)) * time.Second,
-		},
-	}
-
-	log.Info("Launching WebTransport server at: ", server.ListenAddr)
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := server.Run(ctx); err != nil {
-		log.Error(fmt.Sprintf("Server error: %s", err))
-		cancel()
-	}
+	log.Info(fmt.Sprintf("Serving WT. Addr: %s, Cert file: %s, Key file: %s", *listenAddr, *tlsCertPath, *tlsKeyPath))
+	s.ListenAndServeTLS(*tlsCertPath, *tlsKeyPath)
 
 	objects.Stop()
+}
+
+// CORS helper
+
+func CheckOrigin(r *http.Request) bool {
+	return true
 }
