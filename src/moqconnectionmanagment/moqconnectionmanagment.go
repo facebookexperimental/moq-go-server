@@ -15,6 +15,7 @@ import (
 	"facebookexperimental/moq-go-server/moqobject"
 	"facebookexperimental/moq-go-server/moqsession"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/quic-go/webtransport-go"
@@ -27,17 +28,22 @@ func MoqConnectionManagment(ctx context.Context, session *webtransport.Session, 
 
 	// Accept bidirectional streams (control stream)
 	stream, err := session.AcceptStream(ctx)
-	if err != nil {
-		log.Error(fmt.Sprintf("%s - Accepting bidirectional CONTROL stream. Err: %v", namespace, err))
+	isErr, _ := processWTError(err, namespace, "Accepting bidirectional CONTROL stream")
+	if isErr {
 		return
 	}
 
 	moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
 	if moqMsgErr != nil {
-		log.Error(fmt.Sprintf("%s - Receiving client SETUP message. Err: %v", namespace, moqMsgErr))
-		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Receiving SETUP message"})
+		if moqMsgErr == io.EOF {
+			log.Info(fmt.Sprintf("%s - Found end of stream", namespace))
+		} else {
+			log.Error(fmt.Sprintf("%s - Receiving client SETUP message. Err: %v", namespace, moqMsgErr))
+			terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Receiving SETUP message"})
+		}
 		return
 	}
+
 	moqSetup, moqSetUpConv := moqMsg.(moqhelpers.MoqMessageSetup)
 	if moqMsgType != moqhelpers.MoqIdMessageClientSetup || !moqSetUpConv {
 		errStr := fmt.Sprintf("%s - Expecting client SETUP message. Received %d", namespace, moqMsgType)
@@ -92,11 +98,14 @@ func MoqConnectionManagment(ctx context.Context, session *webtransport.Session, 
 		// Process messages in the control loop
 		for {
 			moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
-			//TODO: Check if session has closed successfully
 			if moqMsgErr != nil {
-				log.Error(fmt.Sprintf("%s - Receiving message. Err: %v", moqSession.UniqueName, moqMsgErr))
-				errorSessionMoq.ErrCode = moqhelpers.ErrorGeneric
-				errorSessionMoq.ErrMsg = "Error receiving message"
+				if moqMsgErr == io.EOF {
+					log.Info(fmt.Sprintf("%s - Found end of stream", moqSession.UniqueName))
+				} else {
+					log.Error(fmt.Sprintf("%s - Receiving message. Err: %v", moqSession.UniqueName, moqMsgErr))
+					errorSessionMoq.ErrCode = moqhelpers.ErrorGeneric
+					errorSessionMoq.ErrMsg = "Error receiving message"
+				}
 				break
 			}
 			if moqMsgType == moqhelpers.MoqIdMessageAnnounce {
@@ -400,8 +409,8 @@ func startForwardSubscribeResponses(stream webtransport.Stream, moqSession *moqs
 func startListeningObjects(session *webtransport.Session, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
 	for {
 		uniStream, errAccUni := session.AcceptUniStream(session.Context())
-		if errAccUni != nil {
-			log.Error(fmt.Sprintf("%s - Session closed, not accepting more uni streams: %v", moqSession.UniqueName, errAccUni))
+		isErr, _ := processWTError(errAccUni, moqSession.UniqueName, "Session closed, not accepting more uni streams")
+		if isErr {
 			break
 		}
 		log.Info(fmt.Sprintf("%s(%v) - Accepting incoming uni stream", moqSession.UniqueName, uniStream.StreamID()))
@@ -409,7 +418,11 @@ func startListeningObjects(session *webtransport.Session, moqSession *moqsession
 		go func(uniStream *webtransport.ReceiveStream, session *webtransport.Session, moqtFwdTable *moqfwdtable.MoqFwdTable) {
 			moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(*uniStream)
 			if moqMsgErr != nil {
-				log.Error(fmt.Sprintf("%s - Receiving OBJECT message. Err: %v", moqSession.UniqueName, moqMsgErr))
+				if moqMsgErr == io.EOF {
+					log.Info(fmt.Sprintf("%s - Found end of stream", moqSession.UniqueName))
+				} else {
+					log.Error(fmt.Sprintf("%s - Receiving OBJECT message. Err: %v", moqSession.UniqueName, moqMsgErr))
+				}
 				return
 			}
 
@@ -487,5 +500,19 @@ func startForwardingObjects(session *webtransport.Session, moqSession *moqsessio
 
 	log.Info(fmt.Sprintf("%s(-) - Exit Forwarding Objects thread", moqSession.UniqueName))
 
+	return
+}
+
+// Check error helpers
+func processWTError(err error, uniqueSessionName string, errMsg string) (isErr bool, isEndSession bool) {
+	if err != nil {
+		isErr = true
+		if errors.Is(err, context.Canceled) {
+			isEndSession = true
+			log.Info(fmt.Sprintf("%s - Exiting MOQ because connection finished", uniqueSessionName))
+		} else {
+			log.Error(fmt.Sprintf("%s - %s: %v", uniqueSessionName, errMsg, err))
+		}
+	}
 	return
 }

@@ -199,7 +199,11 @@ func CreateSetupResponse(moqSetup MoqMessageSetup) (moqSetupResponse MoqMessageS
 func ReceiveMessage(stream quichelpers.IWtReadableStream) (moqMessage interface{}, moqMessageType MoqMessageType, err error) {
 	msgType, errMsgType := quichelpers.ReadVarint(stream)
 	if errMsgType != nil {
-		err = errors.New(fmt.Sprintf("MOQ reading message type, err: %v", errMsgType))
+		if errMsgType == io.EOF {
+			err = errMsgType
+		} else {
+			err = errors.New(fmt.Sprintf("MOQ reading message type, err: %v", errMsgType))
+		}
 		return
 	}
 	moqMessageType = MoqMessageType(msgType)
