@@ -83,12 +83,12 @@ const (
 // MOQT messages
 
 // Setup
-type MoqMessageSetup struct {
+type MoqMessageClientSetup struct {
 	SupportedClientVersions []MoqVersion
 	Role                    MoqRole
 }
 
-type MoqMessageSetupResponse struct {
+type MoqMessageServerSetup struct {
 	Version MoqVersion
 	Role    MoqRole
 }
@@ -176,7 +176,20 @@ func CreateAnnounceOK(moqAnnounce MoqMessageAnnounce) (moqAnnounceOk MoqMessageA
 	return
 }
 
-func CreateSetupResponse(moqSetup MoqMessageSetup) (moqSetupResponse MoqMessageSetupResponse, err error) {
+func CreateClientSetup(role MoqRole) (moqSetup MoqMessageClientSetup) {
+	moqSetup.SupportedClientVersions = []MoqVersion{MOQ_SUPPORTED_VERSION}
+	moqSetup.Role = role
+
+	return
+}
+
+func CreateAnnounce(trackNamespace string, authInfo string) (moqAnnounce MoqMessageAnnounce) {
+	moqAnnounce.TrackNamespace = trackNamespace
+	moqAnnounce.AuthInfo = authInfo
+	return
+}
+
+func CreateSetupResponse(moqSetup MoqMessageClientSetup) (moqSetupResponse MoqMessageServerSetup, err error) {
 	if !slices.Contains(moqSetup.SupportedClientVersions, MOQ_SUPPORTED_VERSION) {
 		err = errors.New(fmt.Sprintf("MOQ SETUP not supported version. Offered: %v, supported: %d", moqSetup.SupportedClientVersions, MOQ_SUPPORTED_VERSION))
 		return
@@ -186,8 +199,10 @@ func CreateSetupResponse(moqSetup MoqMessageSetup) (moqSetupResponse MoqMessageS
 		moqSetupResponse.Role = MoqRoleSubscriber
 	} else if moqSetup.Role == MoqRoleSubscriber {
 		moqSetupResponse.Role = MoqRolePublisher
+	} else if moqSetup.Role == MoqRoleBoth {
+		moqSetupResponse.Role = MoqRoleBoth
 	} else {
-		err = errors.New("MOQ SETUP only publisher or subscriber connections supported for now")
+		err = errors.New("MOQ SETUP only publisher, subscriber, or both")
 		return
 	}
 
@@ -199,7 +214,11 @@ func CreateSetupResponse(moqSetup MoqMessageSetup) (moqSetupResponse MoqMessageS
 func ReceiveMessage(stream quichelpers.IWtReadableStream) (moqMessage interface{}, moqMessageType MoqMessageType, err error) {
 	msgType, errMsgType := quichelpers.ReadVarint(stream)
 	if errMsgType != nil {
-		err = errors.New(fmt.Sprintf("MOQ reading message type, err: %v", errMsgType))
+		if errMsgType == io.EOF {
+			err = errMsgType
+		} else {
+			err = errors.New(fmt.Sprintf("MOQ reading message type, err: %v", errMsgType))
+		}
 		return
 	}
 	moqMessageType = MoqMessageType(msgType)
@@ -207,16 +226,35 @@ func ReceiveMessage(stream quichelpers.IWtReadableStream) (moqMessage interface{
 	if msgType == uint64(MoqIdMessageObject) {
 		moqMessage, err = receiveObjectHeader(stream)
 	} else if msgType == uint64(MoqIdMessageClientSetup) {
-		moqMessage, err = receiveSetUp(stream)
+		moqMessage, err = receiveClientSetUp(stream)
+	} else if msgType == uint64(MoqIdMessageServerSetup) {
+		moqMessage, err = receiveServerSetUp(stream)
 	} else if msgType == uint64(MoqIdMessageAnnounce) {
 		moqMessage, err = receiveAnnounce(stream)
 	} else if msgType == uint64(MoqIdSubscribe) {
 		moqMessage, err = receiveSubscribe(stream)
 	} else if msgType == uint64(MoqIdSubscribeOk) {
 		moqMessage, err = receiveSubscribeOk(stream)
+	} else if msgType == uint64(MoqIdSubscribeError) {
+		moqMessage, err = receiveSubscribeError(stream)
+	} else if msgType == uint64(MoqIdMessageAnnounceOk) {
+		moqMessage, err = receiveAnnounceOk(stream)
 	} else {
 		err = errors.New(fmt.Sprintf("MOQ not supported message type %d", msgType))
 	}
+	return
+}
+
+func receiveAnnounceOk(stream quichelpers.IWtReadableStream) (moqAnnounceOk MoqMessageAnnounceOk, err error) {
+	// rx ANNOUNCE OK
+
+	trackNamespace, errTrackNamespace := quichelpers.ReadString(stream, MOQ_MAX_STRING_LENGTH)
+	if errTrackNamespace != nil {
+		err = errors.New(fmt.Sprintf("MOQ SUBSCRIBE OK reading TrackNmespace, err: %v", errTrackNamespace))
+		return
+	}
+	moqAnnounceOk.TrackNamespace = trackNamespace
+
 	return
 }
 
@@ -250,6 +288,40 @@ func receiveSubscribeOk(stream quichelpers.IWtReadableStream) (moqSubscribeOk Mo
 		return
 	}
 	moqSubscribeOk.Expires = expires
+
+	return
+}
+
+func receiveSubscribeError(stream quichelpers.IWtReadableStream) (moqSubscribeError MoqMessageSubscribeError, err error) {
+	// rx SUBSCRIBE Error
+
+	trackNamespace, errTrackNamespace := quichelpers.ReadString(stream, MOQ_MAX_STRING_LENGTH)
+	if errTrackNamespace != nil {
+		err = errors.New(fmt.Sprintf("MOQ SUBSCRIBE ERROR reading TrackNmespace, err: %v", errTrackNamespace))
+		return
+	}
+	moqSubscribeError.TrackNamespace = trackNamespace
+
+	trackName, errTrackName := quichelpers.ReadString(stream, MOQ_MAX_STRING_LENGTH)
+	if errTrackName != nil {
+		err = errors.New(fmt.Sprintf("MOQ SUBSCRIBE ERROR reading trackName, err: %v", errTrackName))
+		return
+	}
+	moqSubscribeError.TrackName = trackName
+
+	errorCode, errErrorCode := quichelpers.ReadVarint(stream)
+	if errErrorCode != nil {
+		err = errors.New(fmt.Sprintf("MOQ SUBSCRIBE ERROR reading ErrorCode, err: %v", errErrorCode))
+		return
+	}
+	moqSubscribeError.ErrCode = MoqErrorCodeSubscribe(errorCode)
+
+	errReason, errErrorReason := quichelpers.ReadString(stream, MOQ_MAX_STRING_LENGTH)
+	if errErrorReason != nil {
+		err = errors.New(fmt.Sprintf("MOQ SUBSCRIBE ERROR reading ErrorReason, err: %v", errErrorReason))
+		return
+	}
+	moqSubscribeError.ErrMsg = errReason
 
 	return
 }
@@ -367,7 +439,28 @@ func receiveAnnounce(stream quichelpers.IWtReadableStream) (moqAnnounce MoqMessa
 	return
 }
 
-func receiveSetUp(stream quichelpers.IWtReadableStream) (moqSetup MoqMessageSetup, err error) {
+func receiveServerSetUp(stream quichelpers.IWtReadableStream) (moqSetup MoqMessageServerSetup, err error) {
+	version, errVersion := quichelpers.ReadVarint(stream)
+	if errVersion != nil {
+		err = errors.New(fmt.Sprintf("MOQ SETUP reading version (%d), err: %v", version, errVersion))
+		return
+	}
+	moqSetup.Version = MoqVersion(version)
+
+	params, errParams := readParameters(stream)
+	if errParams != nil {
+		err = errors.New(fmt.Sprintf("MOQ SETUP reading parameters, err: %v", errParams))
+		return
+	}
+	foundObj, found := params[uint64(MoqParamsRole)]
+	if found {
+		moqSetup.Role = MoqRole(foundObj.(uint64))
+	}
+
+	return
+}
+
+func receiveClientSetUp(stream quichelpers.IWtReadableStream) (moqSetup MoqMessageClientSetup, err error) {
 	// rx SETUP
 	versionsLength, errVersionsLength := quichelpers.ReadVarint(stream)
 	if errVersionsLength != nil {
@@ -457,7 +550,87 @@ func ReadObjPayloadToEOS(stream quichelpers.IWtReadableStream, moqObj *moqobject
 	return err
 }
 
-func SendServerSetup(stream quichelpers.IWtWritableStream, moqSetupResponse MoqMessageSetupResponse) error {
+func SendAnnounce(stream quichelpers.IWtWritableStream, moqAnnounce MoqMessageAnnounce) error {
+	err := quichelpers.WriteVarint(stream, uint64(MoqIdMessageAnnounce))
+	if err != nil {
+		return err
+	}
+
+	// Track namespace
+	err = quichelpers.WriteString(stream, moqAnnounce.TrackNamespace)
+	if err != nil {
+		return err
+	}
+
+	// Number of params
+	err = quichelpers.WriteVarint(stream, uint64(1))
+	if err != nil {
+		return err
+	}
+	// [0]Auth info
+	err = quichelpers.WriteVarint(stream, uint64(MoqParamsAuthorizationInfo))
+	if err != nil {
+		return err
+	}
+	err = quichelpers.WriteString(stream, moqAnnounce.AuthInfo)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func SendClientSetup(stream quichelpers.IWtWritableStream, moqSetup MoqMessageClientSetup) error {
+	err := quichelpers.WriteVarint(stream, uint64(MoqIdMessageClientSetup))
+	if err != nil {
+		return err
+	}
+
+	// Number of versions
+	err = quichelpers.WriteVarint(stream, uint64(len(moqSetup.SupportedClientVersions)))
+	if err != nil {
+		return err
+	}
+
+	// Supported versions
+	for _, version := range moqSetup.SupportedClientVersions {
+		err = quichelpers.WriteVarint(stream, uint64(version))
+		if err != nil {
+			return err
+		}
+	}
+
+	// Number of params
+	err = quichelpers.WriteVarint(stream, uint64(1))
+	if err != nil {
+		return err
+	}
+
+	// Param Role
+	err = quichelpers.WriteVarint(stream, uint64(MoqParamsRole))
+	if err != nil {
+		return err
+	}
+
+	// Role length
+	length, errLength := quichelpers.VarIntLength(uint64(moqSetup.Role))
+	if errLength != nil {
+		return errLength
+	}
+	err = quichelpers.WriteVarint(stream, uint64(length))
+	if err != nil {
+		return err
+	}
+
+	// Role
+	err = quichelpers.WriteVarint(stream, uint64(moqSetup.Role))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func SendServerSetup(stream quichelpers.IWtWritableStream, moqSetupResponse MoqMessageServerSetup) error {
 
 	err := quichelpers.WriteVarint(stream, uint64(MoqIdMessageServerSetup))
 	if err != nil {

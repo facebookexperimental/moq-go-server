@@ -112,8 +112,63 @@ cd src
 
 See details on how use / set up this system as a live streaming relay in [moq-encoder-player testing](https://github.com/facebookexperimental/moq-encoder-player?tab=readme-ov-file#testing)
 
-Note: To test the code in your computer and Chrome you can use the script `scripts/start-localhost-test-chrome.sh` that allows you to use WebTransport in your localhost (not safe environment)
+## Origins
+This implementation allows relat to relay communication. 
+
+![Origns block diagram](./pics/origins.png)
+
+
+The way this works is the follwing:
+- When relay starts reads the json file pointed by `--moq_origins_config`, example `./origins/example-origins.json` (or see below)
+- It opens (and keep opened) an MOQT connection to all other relays it finds in that file
+- The ANNOUNCE messages are kept in the relay where encoder is connected
+- The SUBSCRIBE messages that does NOT find any local producer that matches its `tracknamespace` are forwarded to all the relays that offers that tracknamespace (via `tracknamespace` in its config)
+
+### Example of origin config:
+
+```
+{
+  "origins": [
+    {
+      "friendlyname": "test",
+      "guid": "3ea8e44a82784c7ba0c107b78d9dea9a",
+      "tracknamespace": "simplechat-relay",
+      "authinfo": "my super secret",
+	    "originaddress" : "https://localhost:4455/moq",
+      "origincertpath": "./my-cert.pem"
+    }
+  ]
+}
+```
+
+
+## Testing
+It is recommended that you test on a server with valid certificate. To facilitate debugging you can:
+
+- Install delve
+``
+sudo go install github.com/go-delve/delve/cmd/dlv@latest
+``````
+
+- Build app for debug
+```
+cd src
+go build -gcflags="all=-N -l"
+```
+
+- Run in debug mode in the remove machine
+```
+cd src
+[GO PATH]/go/bin/dlv --listen=:2345 --headless=true --log=true --accept-multiclient --api-version=2 exec moq-go-server -- --listen_addr ":4455"
+```
+Note: The delve listen port needs to be open in that remote machine
+
+- Connect VSCode (or other IDE) to that remote machine
+In this [link](https://blog.devgenius.io/remote-debugging-golang-application-in-vs-code-5215b43ebe31) you can find a good guide
+
+Note: Webtransport implementation of QUIC-GO currently does NOT allow localtesting, see open [issue](https://github.com/quic-go/webtransport-go/issues/112)
 
 ## License
 
 moq-go-server is released under the [MIT License](https://github.com/facebookincubator/rush/blob/master/LICENSE).
+
