@@ -10,17 +10,24 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"facebookexperimental/moq-go-server/moqconnectionmanagment"
+	"facebookexperimental/moq-go-server/moqfwdtable"
+	"facebookexperimental/moq-go-server/moqmessageobjects"
 	"fmt"
+	"time"
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 	log "github.com/sirupsen/logrus"
 )
 
+const RECONNECT_DELAY_MS = 3000
+
 type MoqOriginData struct {
 	FriendlyName   string `json:"friendlyname"`
 	Guid           string `json:"guid"`
-	UrlRegExpStr   string `json:"urlregexp"`
+	TrackNamespace string `json:"tracknamespace"`
+	AuthInfo       string `json:"authinfo"`
 	OriginAddress  string `json:"originaddress"`
 	OriginCertPath string `json:"origincertpath"`
 	CertData       []byte
@@ -31,6 +38,10 @@ type MoqOrigin struct {
 
 	// Housekeeping thread channel
 	cleanUpChannel chan bool
+
+	// Used for WT
+	d            *webtransport.Dialer
+	roundTripper *http3.RoundTripper
 }
 
 type moqOriginExt struct {
@@ -39,11 +50,11 @@ type moqOriginExt struct {
 }
 
 // New Creates a new moq origin
-func newOrigin(moqOriginData MoqOriginData) *MoqOrigin {
-	mor := MoqOrigin{moqOriginData, make(chan bool)}
+func newOrigin(moqOriginData MoqOriginData, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) *MoqOrigin {
+	mor := MoqOrigin{moqOriginData, make(chan bool), nil, nil}
 
 	// Start process thread
-	go mor.process(mor.cleanUpChannel)
+	go mor.process(mor.cleanUpChannel, moqtFwdTable, objects, objExpMs)
 
 	return &mor
 }
@@ -55,27 +66,30 @@ func (mor *MoqOrigin) Close() (err error) {
 	// Wait to finish
 	<-mor.cleanUpChannel
 
+	if mor.d != nil {
+		mor.d.Close()
+	}
+	if mor.roundTripper != nil {
+		mor.roundTripper.Close()
+	}
+	mor.d = nil
+	mor.roundTripper = nil
+
 	return
 }
 
-func (mor *MoqOrigin) process(cleanUpChannelBidi chan bool) {
-	exit := false
-
+func (mor *MoqOrigin) process(cleanUpChannelBidi chan bool, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
 	log.Info(fmt.Sprintf("%s Entering origin process thread", mor.moqOriginData.FriendlyName))
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go mor.processClientSession(ctx)
+	// TODO: Reconnect if disconnected
 
-	for !exit {
-		select {
-		case <-cleanUpChannelBidi:
-			exit = true
-		}
-		// TODO more
+	go mor.processClientSession(ctx, moqtFwdTable, objects, objExpMs)
 
-		// err is only nil if rsp.StatusCode is a 2xx
-		// Handle the connection. Here goes the application logic.
+	select {
+	case <-cleanUpChannelBidi:
+		log.Info(fmt.Sprintf("%s Received exit signal", mor.moqOriginData.FriendlyName))
 	}
 	cancel()
 
@@ -85,27 +99,27 @@ func (mor *MoqOrigin) process(cleanUpChannelBidi chan bool) {
 	log.Info(fmt.Sprintf("%s Exited origin process thread", mor.moqOriginData.FriendlyName))
 }
 
-func (mor *MoqOrigin) processClientSession(ctx context.Context) {
-	session, errConn := mor.connectClientWT(ctx, mor.moqOriginData.OriginAddress, mor.moqOriginData.CertData)
-	if errConn != nil {
-		log.Error(fmt.Sprintf("%s - error connecting WT to: %s. Err %v", mor.moqOriginData.FriendlyName, mor.moqOriginData.OriginAddress, errConn))
-		return
-	}
-	log.Info(fmt.Sprintf("%s - Connected WT", mor.moqOriginData.FriendlyName))
+func (mor *MoqOrigin) processClientSession(ctx context.Context, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
 
-	controlStreamPtr, errStream := mor.moqCreateControlStream(session)
-	if errStream != nil {
-		log.Error(fmt.Sprintf("%s - Creating bidirectional CONTROL stream. Err: %v", mor.moqOriginData.FriendlyName, errStream))
-		return
-	}
-	log.Error(fmt.Sprintf("%s - Created bidirectional CONTROL stream", mor.moqOriginData.FriendlyName))
+	// Loop until context cancelled
+	for ctx.Err() == nil {
+		session, errConn := mor.connectClientWT(ctx, mor.moqOriginData.OriginAddress, mor.moqOriginData.CertData)
+		if errConn != nil {
+			log.Error(fmt.Sprintf("%s - error connecting WT to: %s. Err %v", mor.moqOriginData.FriendlyName, mor.moqOriginData.OriginAddress, errConn))
+		} else {
+			log.Info(fmt.Sprintf("%s - Connected WT", mor.moqOriginData.FriendlyName))
 
-	mor.moqSendSetup(controlStreamPtr)
+			moqconnectionmanagment.MoqConnectionManagment(true, mor.moqOriginData.TrackNamespace, mor.moqOriginData.AuthInfo, ctx, session, mor.moqOriginData.FriendlyName, moqtFwdTable, objects, objExpMs)
+		}
+		sleepWithContext(ctx, RECONNECT_DELAY_MS*time.Millisecond)
+	}
+	return
 }
 
 func (mor *MoqOrigin) connectClientWT(ctx context.Context, addr string, cert []byte) (session *webtransport.Session, err error) {
 
 	var d webtransport.Dialer
+	mor.d = &d
 	if cert != nil {
 		pool, errPool := x509.SystemCertPool()
 		if errPool != nil {
@@ -114,33 +128,28 @@ func (mor *MoqOrigin) connectClientWT(ctx context.Context, addr string, cert []b
 		}
 		pool.AppendCertsFromPEM(cert)
 
-		roundTripper := &http3.RoundTripper{
+		mor.roundTripper = &http3.RoundTripper{
 			TLSClientConfig: &tls.Config{
 				RootCAs:            pool,
 				InsecureSkipVerify: false,
 			},
 		}
-		d.RoundTripper = roundTripper
-		//defer roundTripper.Close()
+		mor.d.RoundTripper = mor.roundTripper
 	}
-	_, session, err = d.Dial(ctx, addr, nil)
+	_, session, err = mor.d.Dial(ctx, addr, nil)
 
 	return
 }
 
-func (mor *MoqOrigin) moqCreateControlStream(session *webtransport.Session) (controlStreamPtr *webtransport.Stream, err error) {
-	controlStream, errOpen := session.OpenStream()
-	err = errOpen
-	if errOpen == nil {
-		controlStreamPtr = &controlStream
-	}
-	return
-}
+// Helpers
 
-func (mor *MoqOrigin) moqSendSetup(ontrolStreamPtr *webtransport.Stream) (err error) {
-	err = nil
-	//TODO: fill this out
-	// How to mix client connections  from QUIC-GO with server from adriancable????
-	// AND allow local tetsing, I can set up remote debugging!
-	return
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	select {
+	case <-ctx.Done():
+		t.Stop()
+		return fmt.Errorf("Interrupted")
+	case <-t.C:
+	}
+	return nil
 }

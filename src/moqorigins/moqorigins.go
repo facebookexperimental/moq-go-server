@@ -6,6 +6,11 @@ LICENSE file in the root directory of this source tree.
 
 package moqorigins
 
+import (
+	"facebookexperimental/moq-go-server/moqfwdtable"
+	"facebookexperimental/moq-go-server/moqmessageobjects"
+)
+
 type MoqOriginsData struct {
 	MoqOrigins []MoqOriginData `json:"origins"`
 }
@@ -20,9 +25,9 @@ func New() *MoqOrigins {
 	return &mos
 }
 
-func (mors *MoqOrigins) Initialize(moqOriginsData MoqOriginsData) (err error) {
+func (mors *MoqOrigins) Initialize(moqOriginsData MoqOriginsData, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) (err error) {
 	for _, moqOriginData := range moqOriginsData.MoqOrigins {
-		or := newOrigin(moqOriginData)
+		or := newOrigin(moqOriginData, moqtFwdTable, objects, objExpMs)
 		mors.moqOriginsInfo = append(mors.moqOriginsInfo, moqOriginExt{moqOriginData, or})
 	}
 	return

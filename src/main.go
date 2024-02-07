@@ -36,7 +36,7 @@ const TLS_KEY_FILEPATH = "../certs/certificate.key"
 const OBJECT_EXPIRATION_MS = 3 * 60 * 1000
 const CACHE_CLEAN_UP_PERIOD_MS = 10 * 1000
 const HTTP_CONNECTION_KEEP_ALIVE_MS = 10 * 1000
-const MOQ_ORIGINS_FILEPATH = "../origins/origins.json"
+const MOQ_ORIGINS_FILEPATH = ""
 
 // Main function
 
@@ -63,7 +63,7 @@ func main() {
 	objects := moqmessageobjects.New(*cacheCleanUpPeriodMs)
 
 	// Load and create origins
-	moqOrigins, errOrigins := loadAndInitializeMoqOrigins(*moqOriginsConfigFile)
+	moqOrigins, errOrigins := loadAndInitializeMoqOrigins(*moqOriginsConfigFile, moqtFwdTable, objects, *objExpMs)
 	if errOrigins != nil {
 		log.Error(fmt.Sprintf("Can not load/parse origins data from file %s. Err: %s", *moqOriginsConfigFile, errOrigins))
 	} else {
@@ -100,7 +100,7 @@ func main() {
 		namespace := r.URL.Path
 		log.Info(fmt.Sprintf("%s - Accepted incoming WebTransport session. rawQuery: %s", namespace, r.URL.RawQuery))
 
-		moqconnectionmanagment.MoqConnectionManagment(ctx, conn, namespace, moqtFwdTable, objects, *objExpMs)
+		moqconnectionmanagment.MoqConnectionManagment(false, "", "", ctx, conn, namespace, moqtFwdTable, objects, *objExpMs)
 	})
 
 	log.Info(fmt.Sprintf("Serving WT. Addr: %s, Cert file: %s, Key file: %s", *listenAddr, *tlsCertPath, *tlsKeyPath))
@@ -122,7 +122,7 @@ func CheckCORSOrigin(r *http.Request) bool {
 
 // Origins helper
 
-func loadAndInitializeMoqOrigins(originsFilepath string) (moqOrigins *moqorigins.MoqOrigins, err error) {
+func loadAndInitializeMoqOrigins(originsFilepath string, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) (moqOrigins *moqorigins.MoqOrigins, err error) {
 	moqOrigins = moqorigins.New()
 	if originsFilepath != "" {
 		// read file
@@ -153,7 +153,7 @@ func loadAndInitializeMoqOrigins(originsFilepath string) (moqOrigins *moqorigins
 		}
 
 		// Create origins
-		moqOrigins.Initialize(originsData)
+		moqOrigins.Initialize(originsData, moqtFwdTable, objects, objExpMs)
 	}
 
 	return moqOrigins, err

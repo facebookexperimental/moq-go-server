@@ -3,7 +3,8 @@
     {
       "friendlyname": "test",
       "guid": "3ea8e44a82784c7ba0c107b78d9dea9a",
-      "urlregexp": ".*",
+      "tracknamespace": "simplechat-relay",
+      "authinfo": "my super secret",
 	    "originaddress" : "https://localhost:4455/moq",
       "origincertpath": "./my-cert.pem"
     }

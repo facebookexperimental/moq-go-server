@@ -11,6 +11,7 @@ import (
 	"errors"
 	"facebookexperimental/moq-go-server/moqfwdtable"
 	"facebookexperimental/moq-go-server/moqhelpers"
+	"facebookexperimental/moq-go-server/moqhelpers/quichelpers"
 	"facebookexperimental/moq-go-server/moqmessageobjects"
 	"facebookexperimental/moq-go-server/moqobject"
 	"facebookexperimental/moq-go-server/moqsession"
@@ -24,114 +25,85 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func MoqConnectionManagment(ctx context.Context, session *webtransport.Session, namespace string, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
+func MoqConnectionManagment(isOrigin bool, originTrackNameSpace string, originAuthInfo string, ctx context.Context, session *webtransport.Session, namespace string, moqtFwdTable *moqfwdtable.MoqFwdTable, objects *moqmessageobjects.MoqMessageObjects, objExpMs uint64) {
+	var err error = nil
+	var stream webtransport.Stream
+	var version moqhelpers.MoqVersion
+	var role moqhelpers.MoqRole
 
-	// Accept bidirectional streams (control stream)
-	stream, err := session.AcceptStream(ctx)
-	isErr, _ := processWTError(err, namespace, "Accepting bidirectional CONTROL stream")
-	if isErr {
+	if !isOrigin {
+		stream, version, role, err = startServerSetup(ctx, session, namespace)
+	} else {
+		stream, version, role, err = startClientSetup(ctx, session, namespace)
+	}
+	if err != nil {
 		return
 	}
 
-	moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
-	if moqMsgErr != nil {
-		if moqMsgErr == io.EOF {
-			log.Info(fmt.Sprintf("%s - Found end of stream", namespace))
-		} else {
-			log.Error(fmt.Sprintf("%s - Receiving client SETUP message. Err: %v", namespace, moqMsgErr))
-			terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Receiving SETUP message"})
-		}
-		return
-	}
-
-	moqSetup, moqSetUpConv := moqMsg.(moqhelpers.MoqMessageSetup)
-	if moqMsgType != moqhelpers.MoqIdMessageClientSetup || !moqSetUpConv {
-		errStr := fmt.Sprintf("%s - Expecting client SETUP message. Received %d", namespace, moqMsgType)
-		log.Error(errStr)
-		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Not received SETUP message"})
-		return
-	}
-	log.Info(fmt.Sprintf("%s - Received client SETUP %v", namespace, moqSetup))
-
-	moqSetupResponse, errMoqCreateSetup := moqhelpers.CreateSetupResponse(moqSetup)
-	if errMoqCreateSetup != nil {
-		log.Error(fmt.Sprintf("%s - Processing client SETUP. Err: %v", namespace, errMoqCreateSetup))
-		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Processing SETUP message"})
-		return
-	}
-
-	if moqSetup.Role != moqhelpers.MoqRolePublisher && moqSetup.Role != moqhelpers.MoqRoleSubscriber {
-		errStr := fmt.Sprintf("%s - Error invalid session type %d", namespace, moqSetup.Role)
-		log.Error(errStr)
-		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Invalid session type"})
-		return
-	}
-
-	moqSession := moqsession.New(namespace+"/"+uuid.New().String(), moqSetupResponse.Version, moqSetup.Role)
+	moqSession := moqsession.New(namespace+"/"+uuid.New().String(), version, role)
 	errAddSession := moqtFwdTable.AddSession(moqSession)
 	if errAddSession != nil {
 		log.Error(fmt.Sprintf("%s - Error adding session %s. Err: %v", moqSession.UniqueName, moqSession.UniqueName, errAddSession))
 		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Adding session"})
 		return
 	}
+	if isOrigin {
+		moqSession.AddTrackNamespace(moqhelpers.CreateAnnounce(originTrackNameSpace, originAuthInfo))
+	}
+	log.Info(fmt.Sprintf("%s - Created new session. Role: %d, version: %d, TrackNamespace: %s", moqSession.UniqueName, role, version, originTrackNameSpace))
 
-	if moqSetup.Role == moqhelpers.MoqRolePublisher {
+	if role == moqhelpers.MoqRolePublisher || role == moqhelpers.MoqRoleBoth {
 		// They will exit when session finishes
 		go startListeningObjects(session, moqSession, moqtFwdTable, objects, objExpMs)
 		go startForwardSubscribes(stream, moqSession)
-	} else if moqSetup.Role == moqhelpers.MoqRoleSubscriber {
+	}
+	if role == moqhelpers.MoqRoleSubscriber || role == moqhelpers.MoqRoleBoth {
 		// It will exit when session finishes
 		go startForwardingObjects(session, moqSession, objects)
 		go startForwardSubscribeResponses(stream, moqSession)
 	}
 
-	errorSessionMoq := moqhelpers.MoqError{}
-	errMoqTxSetup := moqhelpers.SendServerSetup(stream, moqSetupResponse)
-	if errMoqTxSetup != nil {
-		log.Error(fmt.Sprintf("%s - Sending server SETUP message. Err: %v", moqSession.UniqueName, errMoqTxSetup))
-		errorSessionMoq.ErrCode = moqhelpers.ErrorGeneric
-		errorSessionMoq.ErrMsg = "Error sending server SETUP"
-	}
-	log.Info(fmt.Sprintf("%s - Sent server SETUP %v", moqSession.UniqueName, moqSetupResponse))
-
-	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		// Process messages in the control loop
-		for {
-			moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
-			if moqMsgErr != nil {
-				if moqMsgErr == io.EOF {
-					log.Info(fmt.Sprintf("%s - Found end of stream", moqSession.UniqueName))
-				} else {
-					log.Error(fmt.Sprintf("%s - Receiving message. Err: %v", moqSession.UniqueName, moqMsgErr))
-					errorSessionMoq.ErrCode = moqhelpers.ErrorGeneric
-					errorSessionMoq.ErrMsg = "Error receiving message"
-				}
+	var errorSessionMoq moqhelpers.MoqError
+	for {
+		moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
+		if moqMsgErr != nil {
+			if moqMsgErr == io.EOF {
+				log.Info(fmt.Sprintf("%s - Found end of stream", moqSession.UniqueName))
+			} else {
+				log.Error(fmt.Sprintf("%s - Receiving message. Err: %v", moqSession.UniqueName, moqMsgErr))
+				errorSessionMoq.ErrCode = moqhelpers.ErrorGeneric
+				errorSessionMoq.ErrMsg = "Error receiving message"
+			}
+			break
+		}
+		if moqMsgType == moqhelpers.MoqIdMessageAnnounce {
+			errorSessionMoq = processAnnounce(moqMsg, stream, moqSession)
+			if errorSessionMoq.ErrCode != moqhelpers.NoError {
 				break
 			}
-			if moqMsgType == moqhelpers.MoqIdMessageAnnounce {
-				errorSessionMoq = processAnnounce(moqMsg, stream, moqSession)
-				if errorSessionMoq.ErrCode != moqhelpers.NoError {
-					break
-				}
-			} else if moqMsgType == moqhelpers.MoqIdSubscribe {
-				errorSessionMoq = processSubscribe(moqMsg, stream, moqSession, moqtFwdTable)
-				if errorSessionMoq.ErrCode != moqhelpers.NoError {
-					break
-				}
-			} else if moqMsgType == moqhelpers.MoqIdSubscribeOk {
-				errorSessionMoq = processSubscribeOk(moqMsg, stream, moqSession, moqtFwdTable)
-				if errorSessionMoq.ErrCode != moqhelpers.NoError {
-					break
-				}
-			} else if moqMsgType == moqhelpers.MoqIdSubscribeError {
-				errorSessionMoq = processSubscribeError(moqMsg, stream, moqSession, moqtFwdTable)
-				if errorSessionMoq.ErrCode != moqhelpers.NoError {
-					break
-				}
-			} else {
-				//TODO: Process other messages (such as errors)
-				log.Error(fmt.Sprintf("%s - Non expected message received %d", moqSession.UniqueName, moqMsgType))
+		} else if moqMsgType == moqhelpers.MoqIdSubscribe {
+			errorSessionMoq = processSubscribe(moqMsg, stream, moqSession, moqtFwdTable)
+			if errorSessionMoq.ErrCode != moqhelpers.NoError {
+				break
 			}
+		} else if moqMsgType == moqhelpers.MoqIdSubscribeOk {
+			errorSessionMoq = processSubscribeOk(moqMsg, stream, moqSession, moqtFwdTable)
+			if errorSessionMoq.ErrCode != moqhelpers.NoError {
+				break
+			}
+		} else if moqMsgType == moqhelpers.MoqIdMessageAnnounceOk {
+			errorSessionMoq = processAnnounceOk(moqMsg, stream, moqSession, moqtFwdTable)
+			if errorSessionMoq.ErrCode != moqhelpers.NoError {
+				break
+			}
+		} else if moqMsgType == moqhelpers.MoqIdSubscribeError {
+			errorSessionMoq = processSubscribeError(moqMsg, stream, moqSession, moqtFwdTable)
+			if errorSessionMoq.ErrCode != moqhelpers.NoError {
+				break
+			}
+		} else {
+			//TODO: Process other messages (such as errors)
+			log.Error(fmt.Sprintf("%s - Non expected message received %d", moqSession.UniqueName, moqMsgType))
 		}
 	}
 
@@ -145,6 +117,131 @@ func MoqConnectionManagment(ctx context.Context, session *webtransport.Session, 
 	}
 }
 
+func startClientSetup(ctx context.Context, session *webtransport.Session, namespace string) (controlStream webtransport.Stream, version moqhelpers.MoqVersion, role moqhelpers.MoqRole, err error) {
+	stream, errOpen := session.OpenStream()
+	isErr, _ := processWTError(errOpen, namespace, "Creating bidirectional CONTROL stream")
+	if isErr {
+		err = errOpen
+		return
+	}
+
+	// Get data from origin (I'm an origin subscriber)
+	moqClientSetup := moqhelpers.CreateClientSetup(moqhelpers.MoqRoleBoth)
+	errMoqTxSetup := moqhelpers.SendClientSetup(stream, moqClientSetup)
+	if errMoqTxSetup != nil {
+		log.Error(fmt.Sprintf("origin-%s - Error sending client setup", namespace))
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Error sending client setup"})
+		err = errMoqTxSetup
+		return
+	}
+	log.Info(fmt.Sprintf("origin-%s - Sent client SETUP %v", namespace, moqClientSetup))
+
+	moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
+	if moqMsgErr != nil {
+		if moqMsgErr == io.EOF {
+			log.Info(fmt.Sprintf("origin-%s - Found end of stream", namespace))
+		} else {
+			log.Error(fmt.Sprintf("origin-%s - Receiving server SETUP message. Err: %v", namespace, moqMsgErr))
+			terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Receiving server SETUP message"})
+		}
+		err = moqMsgErr
+		return
+	}
+
+	moqSetupServer, moqSetUpConv := moqMsg.(moqhelpers.MoqMessageServerSetup)
+	if moqMsgType != moqhelpers.MoqIdMessageServerSetup || !moqSetUpConv {
+		errMsg := fmt.Sprintf("origin-%s - Expecting server SETUP message. Received %d", namespace, moqMsgType)
+		log.Error(errMsg)
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Not received server SETUP message"})
+		err = errors.New(errMsg)
+		return
+	}
+	log.Info(fmt.Sprintf("origin-%s - Received server SETUP %v", namespace, moqSetupServer))
+
+	if moqSetupServer.Role != moqhelpers.MoqRoleBoth {
+		errMsg := fmt.Sprintf("origin-%s - Error invalid session type %d", namespace, moqSetupServer.Role)
+		log.Error(errMsg)
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Invalid session type"})
+		err = errors.New(errMsg)
+		return
+	}
+
+	if moqSetupServer.Version != moqhelpers.MOQ_SUPPORTED_VERSION {
+		errMsg := fmt.Sprintf("origin-%s - Error version %d not supported, expected %d", namespace, moqSetupServer.Version, moqhelpers.MOQ_SUPPORTED_VERSION)
+		log.Error(errMsg)
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Invalid session version"})
+		err = errors.New(errMsg)
+		return
+	}
+
+	role = moqClientSetup.Role
+	version = moqSetupServer.Version
+	controlStream = stream
+
+	return
+}
+
+func startServerSetup(ctx context.Context, session *webtransport.Session, namespace string) (controlStream webtransport.Stream, version moqhelpers.MoqVersion, role moqhelpers.MoqRole, err error) {
+	// Accept bidirectional streams (control stream)
+	stream, errAccept := session.AcceptStream(ctx)
+	isErr, _ := processWTError(errAccept, namespace, "Accepting bidirectional CONTROL stream")
+	if isErr {
+		err = errAccept
+		return
+	}
+
+	moqMsg, moqMsgType, moqMsgErr := moqhelpers.ReceiveMessage(stream)
+	if moqMsgErr != nil {
+		if moqMsgErr == io.EOF {
+			log.Info(fmt.Sprintf("%s - Found end of stream", namespace))
+		} else {
+			log.Error(fmt.Sprintf("%s - Receiving client SETUP message. Err: %v", namespace, moqMsgErr))
+			terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorGeneric, ErrMsg: "Receiving SETUP message"})
+		}
+		err = moqMsgErr
+		return
+	}
+
+	moqSetup, moqSetUpConv := moqMsg.(moqhelpers.MoqMessageClientSetup)
+	if moqMsgType != moqhelpers.MoqIdMessageClientSetup || !moqSetUpConv {
+		errMsg := fmt.Sprintf("%s - Expecting client SETUP message. Received %d", namespace, moqMsgType)
+		log.Error(errMsg)
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Not received SETUP message"})
+		err = errors.New(errMsg)
+		return
+	}
+	log.Info(fmt.Sprintf("%s - Received client SETUP %v", namespace, moqSetup))
+
+	if moqSetup.Role != moqhelpers.MoqRolePublisher && moqSetup.Role != moqhelpers.MoqRoleSubscriber && moqSetup.Role != moqhelpers.MoqRoleBoth {
+		errMsg := fmt.Sprintf("%s - Error invalid session type %d", namespace, moqSetup.Role)
+		log.Error(errMsg)
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Invalid session type"})
+		err = errors.New(errMsg)
+		return
+	}
+
+	moqSetupResponse, errMoqCreateSetup := moqhelpers.CreateSetupResponse(moqSetup)
+	if errMoqCreateSetup != nil {
+		log.Error(fmt.Sprintf("%s - Processing client SETUP. Err: %v", namespace, errMoqCreateSetup))
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Processing SETUP message"})
+		err = errMoqCreateSetup
+		return
+	}
+
+	errMoqTxSetup := moqhelpers.SendServerSetup(stream, moqSetupResponse)
+	if errMoqTxSetup != nil {
+		log.Error(fmt.Sprintf("%s - Sending server SETUP. Err: %v", namespace, errMoqTxSetup))
+		terminateSessionWithError(session, moqhelpers.MoqError{ErrCode: moqhelpers.ErrorProtocolViolation, ErrMsg: "Sending server SETUP message"})
+	}
+	log.Info(fmt.Sprintf("%s - Sent server SETUP %v", namespace, moqSetupResponse))
+
+	role = moqSetup.Role
+	version = moqSetupResponse.Version
+	controlStream = stream
+
+	return
+}
+
 func terminateSessionWithError(session *webtransport.Session, errMoq moqhelpers.MoqError) {
 	session.CloseWithError(webtransport.SessionErrorCode(errMoq.ErrCode), errMoq.ErrMsg)
 }
@@ -153,7 +250,7 @@ func createObjectCacheKey(trackNamespace string, trackName string, moqObjectHead
 	return trackNamespace + "/" + trackName + "/" + strconv.FormatUint(moqObjectHeader.GroupSequence, 10) + "/" + strconv.FormatUint(moqObjectHeader.ObjectSequence, 10)
 }
 
-func processAnnounce(moqMsg interface{}, stream webtransport.Stream, moqSession *moqsession.MoqSession) (errorSessionMoq moqhelpers.MoqError) {
+func processAnnounce(moqMsg interface{}, stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession) (errorSessionMoq moqhelpers.MoqError) {
 	moqAnnounceError := moqhelpers.MoqMessageAnnounceError{}
 
 	moqAnnounce, moqAnnounceConv := moqMsg.(moqhelpers.MoqMessageAnnounce)
@@ -215,7 +312,29 @@ func processAnnounce(moqMsg interface{}, stream webtransport.Stream, moqSession 
 	return
 }
 
-func processSubscribe(moqMsg interface{}, stream webtransport.Stream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
+func processAnnounceOk(moqMsg interface{}, stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
+	moqAnnounceOk, moqAnnounceConv := moqMsg.(moqhelpers.MoqMessageAnnounceOk)
+	if !moqAnnounceConv {
+		// Break session
+		errorSessionMoq.ErrCode = moqhelpers.ErrorProtocolViolation
+		errorSessionMoq.ErrMsg = "Error casting ANNOUNCE OK"
+		log.Error(fmt.Sprintf("%s - %s", moqSession.UniqueName, errorSessionMoq.ErrMsg))
+	} else {
+		log.Info(fmt.Sprintf("%s - Received ANNOUNCE OK message %v", moqSession.UniqueName, moqAnnounceOk))
+	}
+
+	if errorSessionMoq.ErrCode == moqhelpers.NoError {
+		if moqSession.Role != moqhelpers.MoqRolePublisher {
+			// Break session
+			errorSessionMoq.ErrCode = moqhelpers.ErrorProtocolViolation
+			errorSessionMoq.ErrMsg = "Error received ANNOUNCE OK from NON publisher"
+			log.Error(fmt.Sprintf("%s - %s", moqSession.UniqueName, errorSessionMoq.ErrMsg))
+		}
+	}
+	return
+}
+
+func processSubscribe(moqMsg interface{}, stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
 	moqSubscribeError := moqhelpers.MoqMessageSubscribeError{}
 
 	moqSubscribe, moqSubscribeConv := moqMsg.(moqhelpers.MoqMessageSubscribe)
@@ -230,7 +349,7 @@ func processSubscribe(moqMsg interface{}, stream webtransport.Stream, moqSession
 	}
 
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		if moqSession.Role != moqhelpers.MoqRoleSubscriber {
+		if moqSession.Role != moqhelpers.MoqRoleSubscriber && moqSession.Role != moqhelpers.MoqRoleBoth {
 			// Break session
 			errorSessionMoq.ErrCode = moqhelpers.ErrorProtocolViolation
 			errorSessionMoq.ErrMsg = "Error received SUBSCRIBE from NON subscriber"
@@ -241,7 +360,7 @@ func processSubscribe(moqMsg interface{}, stream webtransport.Stream, moqSession
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
 		errAddingSubscribeReq := moqSession.AddSubscribeRequest(moqSubscribe)
 		if errAddingSubscribeReq != nil {
-			moqSubscribeError = moqhelpers.MoqMessageSubscribeError{ErrCode: moqhelpers.ErrorSubscribeAddingTrack, ErrMsg: "Error Adding new subscription on SUBSCRIBE"}
+			moqSubscribeError = moqhelpers.MoqMessageSubscribeError{TrackNamespace: moqSubscribe.TrackNamespace, TrackName: moqSubscribe.TrackName, ErrCode: moqhelpers.ErrorSubscribeAddingTrack, ErrMsg: "Error Adding new subscription on SUBSCRIBE"}
 			log.Error(fmt.Sprintf("%s - %s. Err: %v", moqSession.UniqueName, moqSubscribeError.ErrMsg, errAddingSubscribeReq))
 		}
 	}
@@ -252,7 +371,7 @@ func processSubscribe(moqMsg interface{}, stream webtransport.Stream, moqSession
 			// Forward every subscribe to publishers of that stream
 			errForwardSubscribe := moqtFwdTable.ForwardSubscribe(moqSubscribe)
 			if errForwardSubscribe != nil {
-				moqSubscribeError = moqhelpers.MoqMessageSubscribeError{ErrCode: moqhelpers.ErrorSubscribeNoPublishers, ErrMsg: errForwardSubscribe.Error()}
+				moqSubscribeError = moqhelpers.MoqMessageSubscribeError{TrackNamespace: moqSubscribe.TrackNamespace, TrackName: moqSubscribe.TrackName, ErrCode: moqhelpers.ErrorSubscribeNoPublishers, ErrMsg: errForwardSubscribe.Error()}
 			}
 		}
 
@@ -272,7 +391,7 @@ func processSubscribe(moqMsg interface{}, stream webtransport.Stream, moqSession
 	return
 }
 
-func processSubscribeOk(moqMsg interface{}, stream webtransport.Stream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
+func processSubscribeOk(moqMsg interface{}, stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
 	moqSubscribeOk, moqSubscribeConv := moqMsg.(moqhelpers.MoqMessageSubscribeOk)
 	if !moqSubscribeConv {
 		// Break session
@@ -284,7 +403,7 @@ func processSubscribeOk(moqMsg interface{}, stream webtransport.Stream, moqSessi
 	}
 
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		if moqSession.Role != moqhelpers.MoqRolePublisher {
+		if moqSession.Role != moqhelpers.MoqRolePublisher && moqSession.Role != moqhelpers.MoqRoleBoth {
 			// Break session
 			errorSessionMoq.ErrCode = moqhelpers.ErrorProtocolViolation
 			errorSessionMoq.ErrMsg = "Error received SUBSCRIBE OK from NON publisher"
@@ -293,7 +412,7 @@ func processSubscribeOk(moqMsg interface{}, stream webtransport.Stream, moqSessi
 	}
 
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		// Forward and add those subscriptions to sessions
+		// Forward and subscription
 		errForwardSubscribe := moqtFwdTable.ForwardSubscribeOk(moqSubscribeOk)
 		if errForwardSubscribe != nil {
 			// Break session
@@ -317,7 +436,7 @@ func processSubscribeOk(moqMsg interface{}, stream webtransport.Stream, moqSessi
 	return
 }
 
-func processSubscribeError(moqMsg interface{}, stream webtransport.Stream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
+func processSubscribeError(moqMsg interface{}, stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession, moqtFwdTable *moqfwdtable.MoqFwdTable) (errorSessionMoq moqhelpers.MoqError) {
 	moqSubscribeError, moqSubscribeConv := moqMsg.(moqhelpers.MoqMessageSubscribeError)
 	if !moqSubscribeConv {
 		// Break session
@@ -330,7 +449,7 @@ func processSubscribeError(moqMsg interface{}, stream webtransport.Stream, moqSe
 	}
 
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		if moqSession.Role != moqhelpers.MoqRolePublisher {
+		if moqSession.Role != moqhelpers.MoqRolePublisher && moqSession.Role != moqhelpers.MoqRoleBoth {
 			// Break session
 			errorSessionMoq.ErrCode = moqhelpers.ErrorProtocolViolation
 			errorSessionMoq.ErrMsg = "Error received SUBSCRIBE Error from NON publisher"
@@ -339,7 +458,6 @@ func processSubscribeError(moqMsg interface{}, stream webtransport.Stream, moqSe
 	}
 
 	if errorSessionMoq.ErrCode == moqhelpers.NoError {
-		// TODO JOC: Forward to subscribers
 		errForwardSubscribe := moqtFwdTable.ForwardSubscribeError(moqSubscribeError)
 		if errForwardSubscribe != nil {
 			// Break session
@@ -353,7 +471,7 @@ func processSubscribeError(moqMsg interface{}, stream webtransport.Stream, moqSe
 
 // Thread for publisher (forward subscribes)
 
-func startForwardSubscribes(stream webtransport.Stream, moqSession *moqsession.MoqSession) {
+func startForwardSubscribes(stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession) {
 	bExit := false
 	for bExit == false {
 		// Get next object cache key
@@ -364,7 +482,7 @@ func startForwardSubscribes(stream webtransport.Stream, moqSession *moqsession.M
 			// TODO we need to add mutex here
 			errSendSubscribe := moqhelpers.SendSubscribe(stream, fwdSubscribe)
 			if errSendSubscribe != nil {
-				log.Error(fmt.Sprintf("%s - Forwarding SUBSCRIBE. Err: %v", moqSession.UniqueName, fwdSubscribe))
+				log.Error(fmt.Sprintf("%s - Forwarding SUBSCRIBE. Err: %v", moqSession.UniqueName, errSendSubscribe))
 			} else {
 				log.Info(fmt.Sprintf("%s - Forwarded SUBSCRIBE message %v", moqSession.UniqueName, fwdSubscribe))
 			}
@@ -376,7 +494,7 @@ func startForwardSubscribes(stream webtransport.Stream, moqSession *moqsession.M
 
 // Thread for subscribers (forward subscribes responses)
 
-func startForwardSubscribeResponses(stream webtransport.Stream, moqSession *moqsession.MoqSession) {
+func startForwardSubscribeResponses(stream quichelpers.IWtWritableStream, moqSession *moqsession.MoqSession) {
 	bExit := false
 	for bExit == false {
 		// Get next object cache key
@@ -388,13 +506,13 @@ func startForwardSubscribeResponses(stream webtransport.Stream, moqSession *moqs
 			var errSendSubscribe error
 			if subscribeRespType == moqhelpers.MoqIdSubscribeOk {
 				errSendSubscribe = moqhelpers.SendSubscribeOk(stream, subscribeResp.(moqhelpers.MoqMessageSubscribeOk))
-			} else if subscribeRespType == moqhelpers.MoqIdMessageAnnounceError {
+			} else if subscribeRespType == moqhelpers.MoqIdSubscribeError {
 				errSendSubscribe = moqhelpers.SendSubscribeError(stream, subscribeResp.(moqhelpers.MoqMessageSubscribeError))
 			} else {
 				errSendSubscribe = errors.New(fmt.Sprintf("We can NOT forward this message type %d as subscribe response", subscribeRespType))
 			}
 			if errSendSubscribe != nil {
-				log.Error(fmt.Sprintf("%s - Forwarding SUBSCRIBE. Err: %v", moqSession.UniqueName, subscribeResp))
+				log.Error(fmt.Sprintf("%s - Forwarding SUBSCRIBE response. Err: %v", moqSession.UniqueName, errSendSubscribe))
 			} else {
 				log.Info(fmt.Sprintf("%s - Forwarded SUBSCRIBE response message %v", moqSession.UniqueName, subscribeResp))
 			}

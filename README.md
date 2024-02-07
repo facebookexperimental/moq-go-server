@@ -141,3 +141,11 @@ Note: Webtransport implementation of QUIC-GO currently does NOT allow localtesti
 ## License
 
 moq-go-server is released under the [MIT License](https://github.com/facebookincubator/rush/blob/master/LICENSE).
+
+
+# TODOs
+ORIGINS:
+DONE - Reconnect origin if disconnected
+DONE - Do not disconnect if no trackname or other errors
+- Do not route if local, route only once
+- Connect Mdr->Lax, and Lax->Mdr and avoid loops (use GUIDs???)
