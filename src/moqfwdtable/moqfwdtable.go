@@ -64,7 +64,7 @@ func (mft *MoqFwdTable) ReceivedObject(cacheKey string) (err error) {
 	defer mft.lock.RUnlock()
 
 	for _, session := range mft.sessions {
-		if session.Role == moqhelpers.MoqRoleSubscriber && session.NeedsToBeDForwarded(cacheKey) {
+		if (session.Role == moqhelpers.MoqRoleSubscriber || session.Role == moqhelpers.MoqRoleBoth) && session.NeedsToBeDForwarded(cacheKey) {
 			session.ReceivedObject(cacheKey)
 		}
 	}
@@ -76,6 +76,7 @@ func (mft *MoqFwdTable) ForwardSubscribe(subscribe moqhelpers.MoqMessageSubscrib
 	mft.lock.RLock()
 	defer mft.lock.RUnlock()
 
+	// Forward to local publishers
 	for _, session := range mft.sessions {
 		if session.Role == moqhelpers.MoqRolePublisher {
 			if session.HasTrackNamespace(subscribe.TrackNamespace) {
@@ -85,6 +86,17 @@ func (mft *MoqFwdTable) ForwardSubscribe(subscribe moqhelpers.MoqMessageSubscrib
 		}
 	}
 
+	if !anyPublishers {
+		// If not found locally forward to relays
+		for _, session := range mft.sessions {
+			if session.Role == moqhelpers.MoqRoleBoth {
+				if session.HasTrackNamespace(subscribe.TrackNamespace) {
+					session.ForwardSubscribe(subscribe)
+					anyPublishers = true
+				}
+			}
+		}
+	}
 	if !anyPublishers {
 		err = errors.New(fmt.Sprintf("We could NOT find any publishers for TrackNamespace %s", subscribe.TrackNamespace))
 	}
@@ -100,7 +112,7 @@ func (mft *MoqFwdTable) ForwardSubscribeOk(subscribeOk moqhelpers.MoqMessageSubs
 	// TODO: Moqbug I need a way to identify the subscribe answer from publisher to source subscriber session
 	// Here is sending OK to all subscribed
 	for _, session := range mft.sessions {
-		if session.Role == moqhelpers.MoqRoleSubscriber {
+		if session.Role == moqhelpers.MoqRoleSubscriber || session.Role == moqhelpers.MoqRoleBoth {
 			updated := session.HasPendingTrackSubscriptionUpdate(subscribeOk.TrackNamespace, subscribeOk.TrackName, subscribeOk.TrackId, subscribeOk.Expires)
 			if updated {
 				session.ForwardSubscribeResponseOk(subscribeOk)
@@ -110,7 +122,7 @@ func (mft *MoqFwdTable) ForwardSubscribeOk(subscribeOk moqhelpers.MoqMessageSubs
 	}
 
 	if !anyUpdatedPublishers {
-		err = errors.New(fmt.Sprintf("We could NOT find any publishers for %v", subscribeOk.TrackNamespace))
+		err = errors.New(fmt.Sprintf("We could NOT find any publishers for %s", subscribeOk.TrackNamespace))
 	}
 
 	return
@@ -124,7 +136,7 @@ func (mft *MoqFwdTable) ForwardSubscribeError(subscribeError moqhelpers.MoqMessa
 	// TODO: Moqbug I need a way to identify the subscribe answer from publisher to source subscriber session
 	// Here is sending OK to all subscribed
 	for _, session := range mft.sessions {
-		if session.Role == moqhelpers.MoqRoleSubscriber {
+		if session.Role == moqhelpers.MoqRoleSubscriber || session.Role == moqhelpers.MoqRoleBoth {
 			deleted := session.HasPendingTrackSubscriptionDelete(subscribeError.TrackNamespace, subscribeError.TrackName)
 			if deleted {
 				session.ForwardSubscribeResponseError(subscribeError)
@@ -134,7 +146,7 @@ func (mft *MoqFwdTable) ForwardSubscribeError(subscribeError moqhelpers.MoqMessa
 	}
 
 	if !anyDeletedPublishers {
-		err = errors.New(fmt.Sprintf("We could NOT find any publishers for %v", subscribeError.TrackNamespace))
+		err = errors.New(fmt.Sprintf("We could NOT find any publishers for %s", subscribeError.TrackNamespace))
 	}
 
 	return
