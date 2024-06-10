@@ -113,7 +113,7 @@ cd src
 See details on how use / set up this system as a live streaming relay in [moq-encoder-player testing](https://github.com/facebookexperimental/moq-encoder-player?tab=readme-ov-file#testing)
 
 ## Origins
-This implementation allows relat to relay communication. 
+This implementation allows relay to relay communication. 
 
 ![Origns block diagram](./pics/origins.png)
 
@@ -146,9 +146,9 @@ The way this works is the follwing:
 It is recommended that you test on a server with valid certificate. To facilitate debugging you can:
 
 - Install delve
-``
+```
 sudo go install github.com/go-delve/delve/cmd/dlv@latest
-``````
+```
 
 - Build app for debug
 ```
