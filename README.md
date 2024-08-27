@@ -1,3 +1,5 @@
+This code is NO longer manteined, it is superseeded by [moxygen](https://github.com/facebookexperimental/moxygen)
+
 # moq-go-server
 
 This is an experimental media MOQ relay (AKA: CDN node) based on [MOQT draft-01](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/). It can be used in conjunction with following live encoder and player [moq-encoder-player](https://github.com/facebookexperimental/moq-encoder-player). Both repos allows us create a live streaming platform where we can control latency and quality (and others), so we can test scenarios from ultra low latency live (video call) to high quality (and high scale) live.
